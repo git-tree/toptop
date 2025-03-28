@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Login",
+  "version": "1.0",
+  "description": "自动填充账号密码并登录",
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"],
+    "run_at": "document_end"
+  }],
+  "icons": {
+    "128": "icon.png"
+  }
+}
