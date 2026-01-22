@@ -1,131 +1,247 @@
-// 等待页面完全加载（避免元素未渲染）
-window.addEventListener('load', async () => {
-  try {
-    // 1. 定位账号/密码/验证码输入框（根据实际页面调整选择器）
-    // 通用选择器：可根据name/id/type匹配，你需要根据目标页面调整
-    const accountInput =  document.querySelector('input.ouryun-input__inner[type="text"]');
-    const passwordInput = document.querySelector('input.ouryun-input__inner[type="password"]');
-    const captchaInput = document.querySelector('input[placeholder*="请输入图片中的字符"]');
-    const captchaImg = document.querySelector('img.captcha-img, .captcha-img'); // 验证码图片元素
-    const loginBtn = document.querySelector('button.ouryun-button.ouryun-button--primary.ouryun-button--large.ouryun-button-custom');
-
-    // 校验关键元素是否存在
-    if (!accountInput || !passwordInput || !captchaInput || !captchaImg || !loginBtn) {
-      console.log('自动登录：未找到登录相关元素，请检查选择器是否匹配');
-      return;
-    }
-
-    // 2. 自动填充账号密码
-    accountInput.value = 'admin';
-    passwordInput.value = 'root123.';
-
-    // 3. 处理验证码：图片转Base64 → 调用接口 → 填充验证码
-    const captchaBase64 = await convertImgToBase64(captchaImg);
-    if (!captchaBase64) {
-      console.log('自动登录：验证码图片转Base64失败');
-      return;
-    }
-
-    // 调用验证码识别接口（替换为你的实际接口地址）
-    const captchaCode = await getCaptchaFromApi(captchaBase64);
-    if (captchaCode) {
-      captchaInput.value = captchaCode; // 填充验证码
-      console.log('自动登录：验证码填充成功，值为：', captchaCode);
-    } else {
-      console.log('自动登录：验证码识别接口返回空');
-      return;
-    }
-
-    // 4. 触发登录（模拟点击登录按钮）
-    setTimeout(() => {
-      loginBtn.click();
-      console.log('自动登录：已点击登录按钮');
-    }, 500); // 延迟500ms，避免页面响应不及时
-
-  } catch (error) {
-    console.error('自动登录执行失败：', error);
-  }
-});
+// 核心：等待指定元素出现的工具函数（轮询检测）
+function waitForElement(selector, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+    const checkElement = () => {
+      const element = document.querySelector(selector);
+      if (element) {
+        resolve(element);
+      } else if (Date.now() - startTime > timeout) {
+        reject(new Error(`等待元素超时（${timeout}ms）：${selector}`));
+      } else {
+        setTimeout(checkElement, 100);
+      }
+    };
+    checkElement();
+  });
+}
 
 /**
- * 将图片元素转为Base64编码
+ * 增强版：将图片元素转为Base64编码（解决跨域/加载超时问题）
  * @param {HTMLElement} imgElement 验证码图片元素
  * @returns {Promise<string>} Base64字符串
  */
-function convertImgToBase64(imgElement) {
-  return new Promise((resolve) => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const img = new Image();
+async function convertImgToBase64(imgElement) {
+  return new Promise(async (resolve) => {
+    // 先等待图片本身加载完成（确保src有效且图片渲染）
+    await waitForImageLoad(imgElement, 5000);
 
-    // 处理跨域图片（如果需要）
-    img.crossOrigin = 'anonymous';
-    img.src = imgElement.src;
+    // 方案1：优先用canvas（常规方案，处理跨域）
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
 
-    img.onload = function () {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
-      const base64 = canvas.toDataURL('image/png'); // 转为PNG格式Base64
-      resolve(base64);
-    };
+      // 处理跨域：兼容不同的跨域配置
+      img.crossOrigin = 'anonymous';
+      // 防止缓存导致的加载失败
+      img.src = imgElement.src + '?t=' + new Date().getTime();
 
-    img.onerror = function () {
-      resolve(''); // 加载失败返回空
-    };
+      img.onload = function () {
+        try {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          const base64 = canvas.toDataURL('image/png');
+          console.log('方案1：Canvas转Base64成功');
+          resolve(base64);
+        } catch (e) {
+          console.warn('Canvas转Base64失败，尝试方案2：', e);
+          // 方案2：直接读取图片元素的src（如果src本身就是Base64）
+          if (imgElement.src.startsWith('data:image/')) {
+            console.log('方案2：直接使用图片src的Base64');
+            resolve(imgElement.src);
+          } else {
+            // 方案3：使用fetch获取图片再转Base64（绕过跨域）
+            fetchImageToBase64(imgElement.src).then(base64 => {
+              if (base64) {
+                console.log('方案3：Fetch转Base64成功');
+                resolve(base64);
+              } else {
+                console.error('所有转Base64方案均失败');
+                resolve('');
+              }
+            });
+          }
+        }
+      };
+
+      img.onerror = function (e) {
+        console.warn('Image加载失败，尝试方案2/3：', e);
+        // 方案2：直接读取src的Base64
+        if (imgElement.src.startsWith('data:image/')) {
+          resolve(imgElement.src);
+        } else {
+          // 方案3：fetch兜底
+          fetchImageToBase64(imgElement.src).then(base64 => resolve(base64 || ''));
+        }
+      };
+    } catch (e) {
+      console.error('转Base64核心逻辑异常：', e);
+      resolve('');
+    }
   });
 }
+
+/**
+ * 辅助函数：等待图片元素本身加载完成
+ * @param {HTMLElement} imgElement 图片元素
+ * @param {number} timeout 超时时间
+ * @returns {Promise<void>}
+ */
+function waitForImageLoad(imgElement, timeout = 5000) {
+  return new Promise((resolve) => {
+    if (imgElement.complete) {
+      resolve();
+      return;
+    }
+    const startTime = Date.now();
+    const checkLoad = () => {
+      if (imgElement.complete) {
+        resolve();
+      } else if (Date.now() - startTime > timeout) {
+        resolve(); // 超时也放行，避免卡住
+      } else {
+        setTimeout(checkLoad, 100);
+      }
+    };
+    checkLoad();
+  });
+}
+
+/**
+ * 辅助函数：通过fetch获取图片并转Base64（绕过跨域限制）
+ * @param {string} imgUrl 图片地址
+ * @returns {Promise<string>}
+ */
+async function fetchImageToBase64(imgUrl) {
+  try {
+    const response = await fetch(imgUrl, {
+      method: 'GET',
+      mode: 'no-cors', // 忽略跨域（关键）
+      cache: 'no-cache'
+    });
+    const blob = await response.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result || '');
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    console.error('Fetch转Base64失败：', e);
+    return '';
+  }
+}
+
+/**
+ * 调用验证码识别接口（通过background转发）
+ * @param {string} base64Str 验证码图片Base64
+ * @returns {Promise<string>} 识别后的验证码值
+ */
 function getCaptchaFromApi(base64Str) {
   return new Promise((resolve, reject) => {
-    // 向background发送消息，由background转发请求
+    if (!base64Str) {
+      reject(new Error('Base64字符串为空'));
+      return;
+    }
     chrome.runtime.sendMessage({
       type: 'decode_base64',
       base64Str: base64Str
     }, (response) => {
       if (response.success) {
-        // 接口返回成功
         if (response.data.success) {
           resolve(response.data.result);
         } else {
           reject(new Error(`接口解码失败：${response.data.error}`));
         }
       } else {
-        // 请求本身失败
         reject(new Error(`调用验证码接口失败：${response.error}`));
       }
     });
   });
 }
-/**
- * 调用验证码识别接口
- * @param {string} base64 验证码图片Base64
- * @returns {Promise<string>} 识别后的验证码值
- */
-// async function getCaptchaFromApi(base64) {
-//   try {
-//     // 替换为你的实际验证码接口地址
-//     const response = await fetch('http://172.16.89.234:5678/decode_base64', {
-//       method: 'POST',
-//       headers: {
-//         'Content-Type': 'application/json',
-//       },
-//       body: JSON.stringify({
-//         base64_str: base64, // 传递Base64图片
-//         // 其他接口所需参数（如type、appId等）
-//       })
-//     });
-//
-//     const result = await response.json();
-//     // 假设接口返回格式：{code: 200, data: {captcha: '1234'}}
-//     // 根据实际接口返回结构调整
-//     if (result.code === 200) {
-//       return result.result
-//     } else {
-//       console.log('验证码接口返回异常：', result);
-//       return '';
-//     }
-//   } catch (error) {
-//     console.error('调用验证码接口失败：', error);
-//     return '';
-//   }
-// }
+
+// 主逻辑：自动登录
+async function autoLogin() {
+  try {
+    console.log('开始执行自动登录，等待关键元素加载...');
+
+    // 1. 等待所有登录相关元素加载完成
+    const accountInput = await waitForElement('input.ouryun-input__inner[type="text"]');
+    const passwordInput = await waitForElement('input.ouryun-input__inner[type="password"]');
+    const captchaInput = await waitForElement('input[placeholder*="请输入图片中的字符"]');
+    const captchaImg = await waitForElement('img.captcha-img, .captcha-img');
+    const loginBtn = await waitForElement('button.ouryun-button.ouryun-button--primary.ouryun-button--large.ouryun-button-custom');
+
+    console.log('所有登录元素加载完成，开始填充信息');
+
+    // 2. 填充账号密码（触发input事件）
+    accountInput.value = 'admin';
+    accountInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    passwordInput.value = 'root123.';
+    passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    // 3. 处理验证码（增加重试逻辑）
+    let captchaBase64 = '';
+    let retryCount = 0;
+    // 最多重试3次
+    while (!captchaBase64 && retryCount < 3) {
+      captchaBase64 = await convertImgToBase64(captchaImg);
+      if (!captchaBase64) {
+        retryCount++;
+        console.log(`验证码转Base64失败，第${retryCount}次重试...`);
+        // 重试前刷新验证码（如果有刷新按钮，可取消注释启用）
+        // const refreshBtn = document.querySelector('.captcha-refresh');
+        // if (refreshBtn) refreshBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (!captchaBase64) {
+      console.log('自动登录：验证码图片转Base64失败（重试3次仍失败）');
+      return;
+    }
+
+    const captchaCode = await getCaptchaFromApi(captchaBase64);
+    if (captchaCode) {
+      captchaInput.value = captchaCode;
+      captchaInput.dispatchEvent(new Event('input', { bubbles: true }));
+      console.log('自动登录：验证码填充成功，值为：', captchaCode);
+    } else {
+      console.log('自动登录：验证码识别接口返回空');
+      return;
+    }
+
+    // 4. 触发登录
+    setTimeout(() => {
+      loginBtn.click();
+      console.log('自动登录：已点击登录按钮');
+    }, 500);
+
+  } catch (error) {
+    console.error('自动登录执行失败：', error);
+  }
+}
+
+// 启动逻辑
+window.addEventListener('load', () => {
+  autoLogin();
+});
+
+// 监听DOM变化，应对页面动态刷新
+const observer = new MutationObserver((mutations) => {
+  mutations.forEach(() => {
+    const accountInput = document.querySelector('input.ouryun-input__inner[type="text"]');
+    if (accountInput && !accountInput.value) {
+      autoLogin();
+    }
+  });
+});
+
+observer.observe(document.body, {
+  childList: true,
+  subtree: true,
+  attributes: true
+});
